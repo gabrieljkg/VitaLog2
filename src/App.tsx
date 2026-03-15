@@ -68,7 +68,8 @@ export default function App() {
   });
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
-  const [cart, setCart] = useState<{product: Product, quantity: number}[]>([]);
+  const [cart, setCart] = useState<{product: Product, quantity: number, discountPercentage?: number}[]>([]);
+  const [cartDiscount, setCartDiscount] = useState<number>(0);
   const [xmlProducts, setXmlProducts] = useState<XMLProduct[]>([]);
   const [isParsingXml, setIsParsingXml] = useState(false);
   const [posSearch, setPosSearch] = useState('');
@@ -111,7 +112,9 @@ export default function App() {
     closedAt: string;
   } | null>(null);
   const [receiptData, setReceiptData] = useState<{
-    items: { product: Product, quantity: number }[],
+    items: { product: Product, quantity: number, discountPercentage?: number }[],
+    subtotal?: number,
+    discount?: number,
     total: number,
     paymentMethod: string,
     amountReceived?: number,
@@ -547,7 +550,7 @@ export default function App() {
             : item
         );
       }
-      return [...prev, { product, quantity: 1 }];
+      return [...prev, { product, quantity: 1, discountPercentage: 0 }];
     });
   };
 
@@ -575,7 +578,7 @@ export default function App() {
             : item
         );
       }
-      return [...prev, { product: selectedProductForWeight, quantity: weight }];
+      return [...prev, { product: selectedProductForWeight, quantity: weight, discountPercentage: 0 }];
     });
 
     setIsWeightModalOpen(false);
@@ -598,6 +601,15 @@ export default function App() {
           return item;
         }
         return { ...item, quantity: newQty };
+      }
+      return item;
+    }));
+  };
+
+  const updateCartItemDiscount = (productId: number, discount: number) => {
+    setCart(prev => prev.map(item => {
+      if (item.product.id === productId) {
+        return { ...item, discountPercentage: Math.min(100, Math.max(0, discount)) };
       }
       return item;
     }));
@@ -713,29 +725,31 @@ export default function App() {
           throw new Error(`Estoque insuficiente para ${item.product.name}. Disponível: ${currentProd?.current_stock || 0}`);
         }
 
-        const itemTotal = item.product.price * item.quantity;
+        const itemTotal = item.product.price * item.quantity * (1 - (item.discountPercentage || 0) / 100);
+        const discountFactor = cartSubtotal > 0 ? cartTotal / cartSubtotal : 1;
+        const discountedItemTotal = itemTotal * discountFactor;
 
         // 2. Create Sale Record
         if (selectedPaymentMethod === 'misto') {
-          if (remainingCash >= itemTotal - 0.001) {
+          if (remainingCash >= discountedItemTotal - 0.001) {
             // Full cash
             const { error: saleError } = await supabase.from('sales').insert([{
               product_id: item.product.id,
               barcode: String(item.product.barcode),
               quantity: item.quantity,
-              total_price: itemTotal,
+              total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: 'dinheiro',
               cash_register_id: currentRegister?.id || null
             }]);
             if (saleError) throw saleError;
-            remainingCash -= itemTotal;
+            remainingCash -= discountedItemTotal;
           } else if (remainingCash > 0.001) {
             // Split
             const cashPart = remainingCash;
-            const cardPart = itemTotal - cashPart;
-            const cashQty = item.quantity * (cashPart / itemTotal);
-            const cardQty = item.quantity * (cardPart / itemTotal);
+            const cardPart = discountedItemTotal - cashPart;
+            const cashQty = item.quantity * (cashPart / discountedItemTotal);
+            const cardQty = item.quantity * (cardPart / discountedItemTotal);
 
             const { error: saleError1 } = await supabase.from('sales').insert([{
               product_id: item.product.id,
@@ -767,13 +781,13 @@ export default function App() {
               product_id: item.product.id,
               barcode: String(item.product.barcode),
               quantity: item.quantity,
-              total_price: itemTotal,
+              total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: mixedCardMethod,
               cash_register_id: currentRegister?.id || null
             }]);
             if (saleError) throw saleError;
-            remainingCard -= itemTotal;
+            remainingCard -= discountedItemTotal;
           }
         } else {
           const { error: saleError } = await supabase
@@ -782,7 +796,7 @@ export default function App() {
               product_id: item.product.id,
               barcode: String(item.product.barcode),
               quantity: item.quantity,
-              total_price: itemTotal,
+              total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: selectedPaymentMethod,
               cash_register_id: currentRegister?.id || null
@@ -809,6 +823,8 @@ export default function App() {
 
       setReceiptData({
         items: [...cart],
+        subtotal: cartSubtotal,
+        discount: cartDiscount,
         total: cartTotal,
         paymentMethod: selectedPaymentMethod === 'misto' ? `Misto (Dinheiro + ${mixedCardMethod.replace('_', ' ')})` : selectedPaymentMethod,
         amountReceived: (selectedPaymentMethod === 'dinheiro' || selectedPaymentMethod === 'misto') ? amountReceived : undefined,
@@ -816,6 +832,7 @@ export default function App() {
         date: new Date().toISOString()
       });
       setCart([]);
+      setCartDiscount(0);
       setIsPaymentModalOpen(false);
       setIsReceiptModalOpen(true);
       setSuccessMessage("Venda realizada com sucesso!");
@@ -908,7 +925,8 @@ export default function App() {
     }, 250);
   };
 
-  const cartTotal = cart.reduce((acc, item) => acc + (item.product.price * item.quantity), 0);
+  const cartSubtotal = cart.reduce((acc, item) => acc + (item.product.price * item.quantity * (1 - (item.discountPercentage || 0) / 100)), 0);
+  const cartTotal = Math.max(0, cartSubtotal - cartDiscount);
   
   const filteredProducts = products.filter(p => 
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -1763,7 +1781,21 @@ export default function App() {
                       <div key={item.product.id} className="flex items-center gap-4 group">
                         <div className="flex-1">
                           <h5 className="font-bold text-sm leading-tight">{item.product.name}</h5>
-                          <p className="text-xs text-slate-400 mt-1">R$ {item.product.price.toFixed(2)} / {item.product.unit || 'un'}</p>
+                          <div className="flex items-center gap-2 mt-1">
+                            <p className="text-xs text-slate-400">R$ {item.product.price.toFixed(2)} / {item.product.unit || 'un'}</p>
+                            <div className="flex items-center gap-1 bg-slate-100 rounded px-1.5 py-0.5">
+                              <span className="text-[10px] font-bold text-slate-500">DESC%</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                value={item.discountPercentage || ''}
+                                onChange={(e) => updateCartItemDiscount(item.product.id, parseFloat(e.target.value) || 0)}
+                                className="w-10 text-xs bg-transparent text-right outline-none font-bold text-sky-600"
+                                placeholder="0"
+                              />
+                            </div>
+                          </div>
                         </div>
                         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg">
                           <button 
@@ -1786,7 +1818,14 @@ export default function App() {
                           </button>
                         </div>
                         <div className="text-right min-w-[80px] flex flex-col items-end gap-1">
-                          <p className="font-bold text-sm">R$ {(item.product.price * item.quantity).toFixed(2)}</p>
+                          <p className="font-bold text-sm">
+                            R$ {(item.product.price * item.quantity * (1 - (item.discountPercentage || 0) / 100)).toFixed(2)}
+                          </p>
+                          {item.discountPercentage ? (
+                            <p className="text-[10px] text-slate-400 line-through">
+                              R$ {(item.product.price * item.quantity).toFixed(2)}
+                            </p>
+                          ) : null}
                           <button 
                             onClick={() => removeFromCart(item.product.id)}
                             className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
@@ -1809,7 +1848,21 @@ export default function App() {
                     <div className="space-y-2">
                       <div className="flex justify-between text-slate-500 text-sm">
                         <span>Subtotal</span>
-                        <span>R$ {cartTotal.toFixed(2)}</span>
+                        <span>R$ {cartSubtotal.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-slate-500 text-sm">
+                        <span>Desconto</span>
+                        <div className="relative w-24">
+                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400">R$</span>
+                          <input 
+                            type="number" 
+                            step="0.01"
+                            min="0"
+                            value={cartDiscount || ''}
+                            onChange={(e) => setCartDiscount(Math.min(cartSubtotal, Math.max(0, parseFloat(e.target.value) || 0)))}
+                            className="w-full pl-7 pr-2 py-1 bg-white border border-slate-200 rounded text-right focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none"
+                          />
+                        </div>
                       </div>
                       <div className="flex justify-between text-slate-900 font-black text-2xl pt-2 border-t border-slate-200">
                         <span>Total</span>
@@ -1819,7 +1872,10 @@ export default function App() {
 
                     <div className="flex gap-3">
                       <button 
-                        onClick={() => setCart([])}
+                        onClick={() => {
+                          setCart([]);
+                          setCartDiscount(0);
+                        }}
                         disabled={cart.length === 0 || isProcessingSale}
                         className="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all disabled:opacity-50"
                       >
@@ -3226,12 +3282,15 @@ export default function App() {
                         <td className="py-1 align-top">
                           {item.product.unit === 'kg' ? item.quantity.toFixed(3) : item.quantity}
                         </td>
-                        <td className="py-1 align-top pr-1">{item.product.name}</td>
+                        <td className="py-1 align-top pr-1">
+                          {item.product.name}
+                          {item.discountPercentage ? ` (-${item.discountPercentage}%)` : ''}
+                        </td>
                         <td className="py-1 align-top text-right">
                           {item.product.price.toFixed(2)}
                         </td>
                         <td className="py-1 align-top text-right">
-                          {(item.product.price * item.quantity).toFixed(2)}
+                          {(item.product.price * item.quantity * (1 - (item.discountPercentage || 0) / 100)).toFixed(2)}
                         </td>
                       </tr>
                     ))}
@@ -3239,6 +3298,19 @@ export default function App() {
                 </table>
 
                 <div className="border-t border-dashed border-slate-400 my-2"></div>
+
+                {receiptData.discount !== undefined && receiptData.discount > 0 && (
+                  <>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span>SUBTOTAL R$</span>
+                      <span>{receiptData.subtotal?.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span>DESCONTO R$</span>
+                      <span>-{receiptData.discount.toFixed(2)}</span>
+                    </div>
+                  </>
+                )}
 
                 <div className="flex justify-between font-bold text-base mb-1">
                   <span>TOTAL R$</span>
