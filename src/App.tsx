@@ -65,10 +65,7 @@ export default function App() {
     ie: '',
     address: 'Rua Exemplo, 123 - Centro',
     phone: '(00) 0000-0000',
-    message: 'Obrigado pela preferência!\nVolte sempre!',
-    focus_token_prod: '',
-    focus_token_homolog: '',
-    focus_environment: 'homologacao'
+    message: 'Obrigado pela preferência!\nVolte sempre!'
   });
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
@@ -123,8 +120,7 @@ export default function App() {
     paymentMethod: string,
     amountReceived?: number,
     change?: number,
-    date: string,
-    nfce_url_pdf?: string
+    date: string
   } | null>(null);
   const [newProduct, setNewProduct] = useState({
     name: '',
@@ -246,13 +242,30 @@ export default function App() {
           .maybeSingle();
 
         if (data) {
-          setStoreSettings(prev => ({ ...prev, ...data }));
+          setStoreSettings(prev => ({ 
+             ...prev, 
+             name: data.name || prev.name,
+             document: data.document || prev.document,
+             ie: data.ie || prev.ie,
+             address: data.address || prev.address,
+             phone: data.phone || prev.phone,
+             message: data.message || prev.message
+          }));
         } else {
           // Fallback se não existir no DB ainda tenta o LocalStorage
           const savedSettings = localStorage.getItem('storeSettings');
           if (savedSettings) {
             try {
-              setStoreSettings(prev => ({ ...prev, ...JSON.parse(savedSettings) }));
+              const parsed = JSON.parse(savedSettings);
+              setStoreSettings(prev => ({ 
+                ...prev, 
+                name: parsed.name || prev.name,
+                document: parsed.document || prev.document,
+                ie: parsed.ie || prev.ie,
+                address: parsed.address || prev.address,
+                phone: parsed.phone || prev.phone,
+                message: parsed.message || prev.message
+              }));
             } catch (e) {
               console.error('Error parsing store settings', e);
             }
@@ -739,51 +752,6 @@ export default function App() {
       let remainingCash = selectedPaymentMethod === 'misto' ? mixedCashAmount : 0;
       let remainingCard = selectedPaymentMethod === 'misto' ? mixedCardAmount : 0;
 
-      let nfcePdf = undefined;
-      let nfceXml = undefined;
-
-      if (storeSettings.focus_token_prod || storeSettings.focus_token_homolog) {
-        try {
-          const saleReference = Date.now().toString();
-          // Payload básico NFC-e Focus
-          const nfcePayload = {
-            natureza_operacao: "Venda de Mercadoria",
-            data_emissao: new Date().toISOString(),
-            cnpj_emitente: storeSettings.document.replace(/\D/g, ''),
-            inscricao_estadual_emitente: storeSettings.ie,
-            itens: cart.map((item, index) => ({
-              numero_item: index + 1,
-              codigo_produto: item.product.barcode || item.product.id.toString(),
-              descricao: item.product.name,
-              quantidade_comercial: item.quantity,
-              valor_unitario_comercial: item.product.price,
-              valor_bruto: item.product.price * item.quantity,
-              cfop: "5102",
-              codigo_ncm: "00000000"
-            }))
-          };
-          
-          const response = await fetch('/api/emit-nfce', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              storeSettings: storeSettings,
-              saleData: { reference: saleReference, payload: nfcePayload }
-            })
-          });
-
-          const data = await response.json();
-          if (data.success && data.url_pdf && data.url_xml) {
-            nfcePdf = data.url_pdf;
-            nfceXml = data.url_xml;
-          } else {
-             console.warn("NFC-e pode não ter sido autorizada imediatamente:", data);
-          }
-        } catch (nfceErr) {
-          console.error("Erro ao emitir NFC-e (local):", nfceErr);
-        }
-      }
-
       // Process each item
       for (const item of cart) {
         // 1. Double check stock
@@ -814,9 +782,7 @@ export default function App() {
               total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: 'dinheiro',
-              cash_register_id: currentRegister?.id || null,
-              nfce_url_pdf: nfcePdf,
-              nfce_url_xml: nfceXml
+              cash_register_id: currentRegister?.id || null
             }]);
             if (saleError) throw saleError;
             remainingCash -= discountedItemTotal;
@@ -834,9 +800,7 @@ export default function App() {
               total_price: cashPart,
               sale_date: new Date().toISOString(),
               payment_method: 'dinheiro',
-              cash_register_id: currentRegister?.id || null,
-              nfce_url_pdf: nfcePdf,
-              nfce_url_xml: nfceXml
+              cash_register_id: currentRegister?.id || null
             }]);
             if (saleError1) throw saleError1;
 
@@ -847,9 +811,7 @@ export default function App() {
               total_price: cardPart,
               sale_date: new Date().toISOString(),
               payment_method: mixedCardMethod,
-              cash_register_id: currentRegister?.id || null,
-              nfce_url_pdf: nfcePdf,
-              nfce_url_xml: nfceXml
+              cash_register_id: currentRegister?.id || null
             }]);
             if (saleError2) throw saleError2;
 
@@ -864,9 +826,7 @@ export default function App() {
               total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: mixedCardMethod,
-              cash_register_id: currentRegister?.id || null,
-              nfce_url_pdf: nfcePdf,
-              nfce_url_xml: nfceXml
+              cash_register_id: currentRegister?.id || null
             }]);
             if (saleError) throw saleError;
             remainingCard -= discountedItemTotal;
@@ -881,9 +841,7 @@ export default function App() {
               total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: selectedPaymentMethod,
-              cash_register_id: currentRegister?.id || null,
-              nfce_url_pdf: nfcePdf,
-              nfce_url_xml: nfceXml
+              cash_register_id: currentRegister?.id || null
             }]);
 
           if (saleError) throw saleError;
@@ -913,8 +871,7 @@ export default function App() {
         paymentMethod: selectedPaymentMethod === 'misto' ? `Misto (Dinheiro + ${mixedCardMethod.replace('_', ' ')})` : selectedPaymentMethod,
         amountReceived: (selectedPaymentMethod === 'dinheiro' || selectedPaymentMethod === 'misto') ? amountReceived : undefined,
         change: (selectedPaymentMethod === 'dinheiro' || selectedPaymentMethod === 'misto') ? change : undefined,
-        date: new Date().toISOString(),
-        nfce_url_pdf: nfcePdf
+        date: new Date().toISOString()
       });
       setCart([]);
       setCartDiscount(0);
@@ -922,6 +879,11 @@ export default function App() {
       setIsReceiptModalOpen(true);
       setSuccessMessage("Venda realizada com sucesso!");
       await fetchData();
+      
+      // Abre a janela de impressão do comprovante imediatamente
+      setTimeout(() => {
+        handlePrintReceipt();
+      }, 500);
     } catch (err: any) {
       console.error("Checkout error details:", err);
       if (err.code === 'PGRST301') {
@@ -940,13 +902,23 @@ export default function App() {
     const printContent = document.getElementById('receipt-content');
     if (!printContent) return;
 
-    const printWindow = window.open('', '_blank', 'width=400,height=600');
-    if (!printWindow) {
-      alert('Por favor, permita popups no seu navegador para imprimir o cupom.');
-      return;
-    }
+    // Remove any existing print iframes
+    const existingFrame = document.getElementById('print-frame');
+    if (existingFrame) existingFrame.remove();
 
-    printWindow.document.write(`
+    const iframe = document.createElement('iframe');
+    iframe.id = 'print-frame';
+    iframe.style.position = 'absolute';
+    iframe.style.width = '0px';
+    iframe.style.height = '0px';
+    iframe.style.border = 'none';
+    
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow?.document;
+    if (!doc) return;
+
+    doc.open();
+    doc.write(`
       <html>
         <head>
           <title>Cupom Fiscal</title>
@@ -999,14 +971,12 @@ export default function App() {
         </body>
       </html>
     `);
+    doc.close();
 
-    printWindow.document.close();
-    printWindow.focus();
-    
     // Timeout to allow rendering before print dialog
     setTimeout(() => {
-      printWindow.print();
-      printWindow.close();
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
     }, 250);
   };
 
@@ -1119,13 +1089,23 @@ export default function App() {
       return;
     }
 
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-      alert('Por favor, permita popups no seu navegador para imprimir o relatório.');
-      return;
-    }
+    // Remove any existing print iframes
+    const existingFrame = document.getElementById('print-frame');
+    if (existingFrame) existingFrame.remove();
 
-    printWindow.document.write(`
+    const iframe = document.createElement('iframe');
+    iframe.id = 'print-frame';
+    iframe.style.position = 'absolute';
+    iframe.style.width = '0px';
+    iframe.style.height = '0px';
+    iframe.style.border = 'none';
+
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow?.document;
+    if (!doc) return;
+
+    doc.open();
+    doc.write(`
       <html>
         <head>
           <title>Relatório VitalLog</title>
@@ -1194,12 +1174,12 @@ export default function App() {
         </body>
       </html>
     `);
-    printWindow.document.close();
-    printWindow.focus();
-    
+    doc.close();
+
     // Wait a bit for charts (SVGs) to render if any
     setTimeout(() => {
-      printWindow.print();
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
     }, 500);
   };
 
@@ -2686,54 +2666,6 @@ export default function App() {
                       />
                     </div>
 
-                    <div className="pt-6 mt-6 border-t border-slate-100">
-                      <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-                        <Link className="text-sky-600" size={24} />
-                        Credenciais de Integração (Focus NFe)
-                      </h3>
-
-                      <div className="space-y-6">
-                        <div>
-                          <label className="block text-sm font-bold text-slate-700 mb-2">Chave de API FocusNFe (Homologação)</label>
-                          <input 
-                            type="password" 
-                            value={storeSettings.focus_token_homolog}
-                            onChange={e => setStoreSettings({...storeSettings, focus_token_homolog: e.target.value})}
-                            placeholder="Ex: ak_..."
-                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-sm font-bold text-slate-700 mb-2">Chave de API FocusNFe (Produção)</label>
-                          <input 
-                            type="password" 
-                            value={storeSettings.focus_token_prod}
-                            onChange={e => setStoreSettings({...storeSettings, focus_token_prod: e.target.value})}
-                            placeholder="Ex: ak_..."
-                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-200">
-                          <div>
-                            <p className="font-bold text-slate-900">Ambiente de Operação</p>
-                            <p className="text-sm text-slate-500">Escolha para onde as notas serão enviadas</p>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <span className={`text-sm font-medium ${storeSettings.focus_environment === 'homologacao' ? 'text-sky-600' : 'text-slate-400'}`}>Teste</span>
-                            <button
-                              onClick={() => setStoreSettings(s => ({...s, focus_environment: s.focus_environment === 'homologacao' ? 'producao' : 'homologacao'}))}
-                              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${storeSettings.focus_environment === 'producao' ? 'bg-sky-600' : 'bg-slate-300'}`}
-                            >
-                              <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${storeSettings.focus_environment === 'producao' ? 'translate-x-6' : 'translate-x-1'}`} />
-                            </button>
-                            <span className={`text-sm font-medium ${storeSettings.focus_environment === 'producao' ? 'text-sky-600' : 'text-slate-400'}`}>Real</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
                     <div className="pt-4 flex gap-4 border-t border-slate-100">
                       <button 
                         onClick={async () => {
@@ -2749,10 +2681,7 @@ export default function App() {
                                   ie: storeSettings.ie,
                                   address: storeSettings.address,
                                   phone: storeSettings.phone,
-                                  message: storeSettings.message,
-                                  focus_token_prod: storeSettings.focus_token_prod,
-                                  focus_token_homolog: storeSettings.focus_token_homolog,
-                                  focus_environment: storeSettings.focus_environment
+                                  message: storeSettings.message
                                 });
                               if (error) throw error;
                             }
@@ -2767,10 +2696,11 @@ export default function App() {
                             setTimeout(() => setError(null), 3000);
                           }
                         }}
-                        className="flex-1 py-3 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-700 transition-colors flex items-center justify-center gap-2"
+                        disabled={isSaving}
+                        className="flex-1 py-3 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                       >
-                        <Save size={20} />
-                        Salvar Configurações
+                        {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Save size={20} />}
+                        {isSaving ? 'Salvando...' : 'Salvar Configurações'}
                       </button>
                       <button 
                         onClick={() => {
@@ -3533,15 +3463,6 @@ export default function App() {
                   <Printer size={20} />
                   Imprimir Cupom
                 </button>
-                {receiptData.nfce_url_pdf && (
-                  <button
-                    onClick={() => window.open(receiptData.nfce_url_pdf, '_blank')}
-                    className="flex-[2] py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <FileText size={20} />
-                    NFC-e XML/PDF
-                  </button>
-                )}
               </div>
             </motion.div>
           </div>
