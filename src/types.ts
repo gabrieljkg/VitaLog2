@@ -21,6 +21,8 @@ export interface Sale {
   total_price: number;
   payment_method?: 'dinheiro' | 'cartao_credito' | 'cartao_debito' | 'pix';
   cash_register_id?: string;
+  nfce_url_pdf?: string;
+  nfce_url_xml?: string;
 }
 
 export interface CashRegister {
