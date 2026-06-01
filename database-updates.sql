@@ -31,3 +31,38 @@ WITH CHECK (true);
 CREATE POLICY "Permitir atualização de caixas para todos" 
 ON cash_registers FOR UPDATE 
 USING (true);
+
+-- 5. Configurações por Tenant / Loja (SaaS)
+CREATE TABLE IF NOT EXISTS store_settings (
+    user_id uuid REFERENCES auth.users(id) PRIMARY KEY,
+    name text,
+    document text,
+    ie text, -- Inscrição Estadual
+    address text,
+    phone text,
+    message text,
+    focus_token_prod text,
+    focus_token_homolog text,
+    focus_environment text CHECK (focus_environment IN ('producao', 'homologacao')) DEFAULT 'homologacao',
+    created_at timestamp with time zone DEFAULT timezone('utc'::text, now()),
+    updated_at timestamp with time zone DEFAULT timezone('utc'::text, now())
+);
+
+ALTER TABLE store_settings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own settings"
+    ON store_settings FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own settings"
+    ON store_settings FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own settings"
+    ON store_settings FOR UPDATE
+    USING (auth.uid() = user_id);
+
+-- 6. Adicionar campos de retorno de NFC-e na tabela de vendas
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS nfce_url_pdf text;
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS nfce_url_xml text;
+
