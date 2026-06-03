@@ -30,8 +30,11 @@ import {
   ClipboardList,
   Save,
   Scale,
-  Settings as SettingsIcon
+  Settings as SettingsIcon,
+  Tag,
+  Barcode
 } from 'lucide-react';
+import BarcodeComponent from 'react-barcode';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   BarChart, 
@@ -58,7 +61,12 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [paymentStatus, setPaymentStatus] = useState<string | null>('loading');
   const [reportFilter, setReportFilter] = useState<'today' | 'week' | 'month' | 'year' | 'all'>('month');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'pos' | 'reports' | 'ai' | 'xml' | 'audit' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'pos' | 'reports' | 'ai' | 'xml' | 'audit' | 'settings' | 'labels'>('dashboard');
+  
+  // Label Printing State
+  const [labelQueue, setLabelQueue] = useState<{product: Product, quantity: number}[]>([]);
+  const [labelSize, setLabelSize] = useState<'40x40' | '60x40' | 'pimaco'>('40x40');
+  const [isPrintingLabels, setIsPrintingLabels] = useState(false);
   const [storeSettings, setStoreSettings] = useState({
     name: 'NOME DO ESTABELECIMENTO',
     document: 'CNPJ: 00.000.000/0001-00',
@@ -103,6 +111,10 @@ export default function App() {
   const [amountReceived, setAmountReceived] = useState<number>(0);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
+  const [currentLojaId, setCurrentLojaId] = useState<string | number | null>(null);
+  const [registerSalesCash, setRegisterSalesCash] = useState<number>(0);
+  const [registerSalesOther, setRegisterSalesOther] = useState<number>(0);
+  const [isFetchingRegisterSales, setIsFetchingRegisterSales] = useState(false);
   const [closedRegisterSummary, setClosedRegisterSummary] = useState<{
     initialBalance: number;
     salesMoney: number;
@@ -169,16 +181,28 @@ export default function App() {
 
       // Fetch Sales (Optional - don't block if it fails)
       try {
-        const { data: sData, error: sError } = await supabase
-          .from('sales')
-          .select('*, products(name)')
-          .order('sale_date', { ascending: false });
+        const { data: sessionData } = await supabase.auth.getSession();
+        let lojaIdToUse = currentLojaId;
+        if (!lojaIdToUse && sessionData?.session?.user?.id) {
+          const { data: loja } = await supabase.from('lojas').select('id').eq('user_id', sessionData.session.user.id).maybeSingle();
+          if (loja) lojaIdToUse = loja.id;
+        }
+
+        let query = supabase.from('sales').select('*').order('sale_date', { ascending: false });
+        if (lojaIdToUse) {
+          query = query.eq('loja_id', lojaIdToUse);
+        }
+
+        const { data: sData, error: sError } = await query;
 
         if (!sError && sData) {
-          const formattedSales = sData.map(s => ({
-            ...s,
-            product_name: (s as any).products?.name || 'Produto Removido'
-          }));
+          const formattedSales = sData.map(s => {
+            const product = pData?.find(p => p.id === s.product_id);
+            return {
+              ...s,
+              product_name: product ? product.name : 'Produto Removido'
+            };
+          });
           setSales(formattedSales);
         } else if (sError && sError.code !== '42P01') {
           console.warn("Sales fetch error:", sError);
@@ -276,10 +300,22 @@ export default function App() {
       }
     };
 
+    const loadLoja = async (userId: string) => {
+      try {
+        const { data, error } = await supabase.from('lojas').select('id').eq('user_id', userId).maybeSingle();
+        if (data && !error) {
+          setCurrentLojaId(data.id);
+        }
+      } catch (err) {
+        console.error('Erro ao ler loja_id:', err);
+      }
+    };
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session?.user?.id) {
         loadSettings(session.user.id);
+        loadLoja(session.user.id);
       }
     });
 
@@ -287,13 +323,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let channel: any;
     if (session) {
       fetchData();
       checkPaymentStatus(session.user.id);
+
+      channel = supabase
+        .channel('public:sales')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'sales', filter: currentLojaId ? `loja_id=eq.${currentLojaId}` : undefined },
+          () => {
+            fetchData();
+          }
+        )
+        .subscribe();
     } else {
       setPaymentStatus('loading');
     }
-  }, [session]);
+
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
+  }, [session, currentLojaId]);
 
   const checkPaymentStatus = async (userId: string) => {
     try {
@@ -657,6 +711,47 @@ export default function App() {
     }));
   };
 
+  const openRegisterModal = async () => {
+    setIsRegisterModalOpen(true);
+    if (currentRegister) {
+      setIsFetchingRegisterSales(true);
+      try {
+        const { data, error } = await supabase
+          .from('sales')
+          .select('total_price, payment_method, valor_dinheiro, valor_cartao, valor_pix')
+          .eq('cash_register_id', currentRegister.id);
+          
+        if (error) throw error;
+        
+        let cash = 0;
+        let other = 0;
+        if (data && data.length > 0) {
+          data.forEach(s => {
+            const saleCash = (s.valor_dinheiro !== null && s.valor_dinheiro !== undefined) ? s.valor_dinheiro : (s.payment_method === 'dinheiro' ? s.total_price : 0);
+            const saleOther = (s.valor_cartao !== null && s.valor_pix !== null && s.valor_cartao !== undefined && s.valor_pix !== undefined) ? ((s.valor_cartao || 0) + (s.valor_pix || 0)) : (s.payment_method !== 'dinheiro' ? s.total_price : 0);
+            cash += saleCash;
+            other += saleOther;
+          });
+        } else {
+          // Fallback to local state if Supabase delay
+          const localRegisterSales = sales.filter(s => String(s.cash_register_id) === String(currentRegister.id));
+          localRegisterSales.forEach(s => {
+            const saleCash = (s.valor_dinheiro !== undefined) ? (s.valor_dinheiro || 0) : (s.payment_method === 'dinheiro' ? s.total_price : 0);
+            const saleOther = (s.valor_cartao !== undefined && s.valor_pix !== undefined) ? ((s.valor_cartao || 0) + (s.valor_pix || 0)) : (s.payment_method !== 'dinheiro' ? s.total_price : 0);
+            cash += saleCash;
+            other += saleOther;
+          });
+        }
+        setRegisterSalesCash(cash);
+        setRegisterSalesOther(other);
+      } catch (err) {
+        console.error("Error fetching register sales:", err);
+      } finally {
+        setIsFetchingRegisterSales(false);
+      }
+    }
+  };
+
   const openRegister = async () => {
     try {
       const { data, error } = await supabase
@@ -692,8 +787,8 @@ export default function App() {
       
       if (error) throw error;
 
-      const salesMoney = sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method === 'dinheiro').reduce((acc, s) => acc + s.total_price, 0);
-      const salesOther = sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method !== 'dinheiro').reduce((acc, s) => acc + s.total_price, 0);
+      const salesMoney = registerSalesCash;
+      const salesOther = registerSalesOther;
       const expectedBalance = currentRegister.initial_balance + salesMoney;
       const difference = registerFinalBalance - expectedBalance;
 
@@ -782,7 +877,11 @@ export default function App() {
               total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: 'dinheiro',
-              cash_register_id: currentRegister?.id || null
+              cash_register_id: currentRegister?.id || null,
+              loja_id: currentLojaId || null,
+              valor_dinheiro: discountedItemTotal,
+              valor_cartao: 0,
+              valor_pix: 0
             }]);
             if (saleError) throw saleError;
             remainingCash -= discountedItemTotal;
@@ -800,7 +899,11 @@ export default function App() {
               total_price: cashPart,
               sale_date: new Date().toISOString(),
               payment_method: 'dinheiro',
-              cash_register_id: currentRegister?.id || null
+              cash_register_id: currentRegister?.id || null,
+              loja_id: currentLojaId || null,
+              valor_dinheiro: cashPart,
+              valor_cartao: 0,
+              valor_pix: 0
             }]);
             if (saleError1) throw saleError1;
 
@@ -811,7 +914,11 @@ export default function App() {
               total_price: cardPart,
               sale_date: new Date().toISOString(),
               payment_method: mixedCardMethod,
-              cash_register_id: currentRegister?.id || null
+              cash_register_id: currentRegister?.id || null,
+              loja_id: currentLojaId || null,
+              valor_dinheiro: 0,
+              valor_cartao: (mixedCardMethod === 'cartao_credito' || mixedCardMethod === 'cartao_debito') ? cardPart : 0,
+              valor_pix: mixedCardMethod === 'pix' ? cardPart : 0
             }]);
             if (saleError2) throw saleError2;
 
@@ -826,7 +933,11 @@ export default function App() {
               total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: mixedCardMethod,
-              cash_register_id: currentRegister?.id || null
+              cash_register_id: currentRegister?.id || null,
+              loja_id: currentLojaId || null,
+              valor_dinheiro: 0,
+              valor_cartao: (mixedCardMethod === 'cartao_credito' || mixedCardMethod === 'cartao_debito') ? discountedItemTotal : 0,
+              valor_pix: mixedCardMethod === 'pix' ? discountedItemTotal : 0
             }]);
             if (saleError) throw saleError;
             remainingCard -= discountedItemTotal;
@@ -841,7 +952,11 @@ export default function App() {
               total_price: discountedItemTotal,
               sale_date: new Date().toISOString(),
               payment_method: selectedPaymentMethod,
-              cash_register_id: currentRegister?.id || null
+              cash_register_id: currentRegister?.id || null,
+              loja_id: currentLojaId || null,
+              valor_dinheiro: selectedPaymentMethod === 'dinheiro' ? discountedItemTotal : 0,
+              valor_cartao: (selectedPaymentMethod === 'cartao_credito' || selectedPaymentMethod === 'cartao_debito') ? discountedItemTotal : 0,
+              valor_pix: selectedPaymentMethod === 'pix' ? discountedItemTotal : 0
             }]);
 
           if (saleError) throw saleError;
@@ -899,85 +1014,37 @@ export default function App() {
   };
 
   const handlePrintReceipt = () => {
-    const printContent = document.getElementById('receipt-content');
-    if (!printContent) return;
+    window.print();
+  };
 
-    // Remove any existing print iframes
-    const existingFrame = document.getElementById('print-frame');
-    if (existingFrame) existingFrame.remove();
+  const addToLabelQueue = (product: Product) => {
+    setLabelQueue(prev => {
+      const existing = prev.find(p => p.product.id === product.id);
+      if (existing) {
+        return prev.map(p => p.product.id === product.id ? { ...p, quantity: p.quantity + 1 } : p);
+      }
+      return [...prev, { product, quantity: 1 }];
+    });
+  };
 
-    const iframe = document.createElement('iframe');
-    iframe.id = 'print-frame';
-    iframe.style.position = 'absolute';
-    iframe.style.width = '0px';
-    iframe.style.height = '0px';
-    iframe.style.border = 'none';
-    
-    document.body.appendChild(iframe);
-    const doc = iframe.contentWindow?.document;
-    if (!doc) return;
+  const removeFromLabelQueue = (productId: string | number) => {
+    setLabelQueue(prev => prev.filter(p => p.product.id !== productId));
+  };
 
-    doc.open();
-    doc.write(`
-      <html>
-        <head>
-          <title>Cupom Fiscal</title>
-          <style>
-            body {
-              font-family: 'Courier New', Courier, monospace;
-              font-size: 12px;
-              margin: 0;
-              padding: 10px;
-              width: 80mm; /* Largura padrão de impressora térmica */
-              color: #000;
-            }
-            .text-center { text-align: center; }
-            .text-right { text-align: right; }
-            .text-left { text-align: left; }
-            .font-bold { font-weight: bold; }
-            .text-lg { font-size: 16px; }
-            .text-xs { font-size: 10px; }
-            .text-sm { font-size: 12px; }
-            .text-base { font-size: 14px; }
-            .mb-1 { margin-bottom: 4px; }
-            .mb-2 { margin-bottom: 8px; }
-            .mb-4 { margin-bottom: 16px; }
-            .mt-1 { margin-top: 4px; }
-            .mt-2 { margin-top: 8px; }
-            .mt-4 { margin-top: 16px; }
-            .py-1 { padding-top: 4px; padding-bottom: 4px; }
-            .pb-1 { padding-bottom: 4px; }
-            .pr-1 { padding-right: 4px; }
-            .w-full { width: 100%; }
-            .border-t { border-top: 1px dashed #000; }
-            .my-2 { margin-top: 8px; margin-bottom: 8px; }
-            .flex { display: flex; }
-            .justify-between { justify-content: space-between; }
-            .justify-center { justify-content: center; }
-            .items-center { align-items: center; }
-            .flex-col { flex-direction: column; }
-            .uppercase { text-transform: uppercase; }
-            .whitespace-pre-line { white-space: pre-line; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { vertical-align: top; }
-            @media print {
-              @page { margin: 0; }
-              body { margin: 0; padding: 10px; }
-            }
-          </style>
-        </head>
-        <body>
-          ${printContent.innerHTML}
-        </body>
-      </html>
-    `);
-    doc.close();
+  const updateLabelQuantity = (productId: string | number, qty: number) => {
+    if (qty <= 0) {
+      removeFromLabelQueue(productId);
+      return;
+    }
+    setLabelQueue(prev => prev.map(p => p.product.id === productId ? { ...p, quantity: qty } : p));
+  };
 
-    // Timeout to allow rendering before print dialog
+  const handlePrintLabels = () => {
+    setIsPrintingLabels(true);
     setTimeout(() => {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    }, 250);
+      window.print();
+      setIsPrintingLabels(false);
+    }, 500);
   };
 
   const cartSubtotal = cart.reduce((acc, item) => acc + (item.product.price * item.quantity * (1 - (item.discountPercentage || 0) / 100)), 0);
@@ -994,21 +1061,30 @@ export default function App() {
     (p.barcode && p.barcode.toLowerCase().includes(posSearch.toLowerCase()))
   );
 
+  const getBrazilDateParts = (date: Date) => {
+    return date.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD
+  };
+
   const filteredSalesForReport = useMemo(() => {
-    const now = new Date();
+    const todayStr = getBrazilDateParts(new Date());
+    const thisMonthStr = todayStr.substring(0, 7);
+    const thisYearStr = todayStr.substring(0, 4);
+    
     return sales.filter(sale => {
-      const saleDate = new Date(sale.sale_date);
+      const saleDateStr = getBrazilDateParts(new Date(sale.sale_date));
       switch (reportFilter) {
         case 'today':
-          return saleDate.toDateString() === now.toDateString();
+          return saleDateStr === todayStr;
         case 'week':
-          const weekAgo = new Date(now);
-          weekAgo.setDate(now.getDate() - 7);
-          return saleDate >= weekAgo;
+          // Approx week: just use last 7 days from now
+          const now = new Date();
+          const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          const weekAgoStr = getBrazilDateParts(weekAgo);
+          return saleDateStr >= weekAgoStr && saleDateStr <= todayStr;
         case 'month':
-          return saleDate.getMonth() === now.getMonth() && saleDate.getFullYear() === now.getFullYear();
+          return saleDateStr.startsWith(thisMonthStr);
         case 'year':
-          return saleDate.getFullYear() === now.getFullYear();
+          return saleDateStr.startsWith(thisYearStr);
         case 'all':
         default:
           return true;
@@ -1017,20 +1093,24 @@ export default function App() {
   }, [sales, reportFilter]);
 
   const filteredCashRegistersForReport = useMemo(() => {
-    const now = new Date();
+    const todayStr = getBrazilDateParts(new Date());
+    const thisMonthStr = todayStr.substring(0, 7);
+    const thisYearStr = todayStr.substring(0, 4);
+
     return cashRegisters.filter(register => {
-      const openDate = new Date(register.opened_at);
+      const openDateStr = getBrazilDateParts(new Date(register.opened_at));
       switch (reportFilter) {
         case 'today':
-          return openDate.toDateString() === now.toDateString();
+          return openDateStr === todayStr;
         case 'week':
-          const weekAgo = new Date(now);
-          weekAgo.setDate(now.getDate() - 7);
-          return openDate >= weekAgo;
+          const now = new Date();
+          const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          const weekAgoStr = getBrazilDateParts(weekAgo);
+          return openDateStr >= weekAgoStr && openDateStr <= todayStr;
         case 'month':
-          return openDate.getMonth() === now.getMonth() && openDate.getFullYear() === now.getFullYear();
+          return openDateStr.startsWith(thisMonthStr);
         case 'year':
-          return openDate.getFullYear() === now.getFullYear();
+          return openDateStr.startsWith(thisYearStr);
         case 'all':
         default:
           return true;
@@ -1038,13 +1118,33 @@ export default function App() {
     });
   }, [cashRegisters, reportFilter]);
 
+  const getSaleRevenue = (s: any) => {
+    const sum = (s.valor_dinheiro || 0) + (s.valor_cartao || 0) + (s.valor_pix || 0);
+    return sum > 0 ? sum : (s.total_price || 0);
+  };
+
+  const getSaleCash = (s: any) => {
+    if (s.valor_dinheiro !== undefined && s.valor_dinheiro !== null) {
+      return s.valor_dinheiro;
+    }
+    return s.payment_method === 'dinheiro' ? (s.total_price || 0) : 0;
+  };
+
+  const getSaleCardOrPix = (s: any) => {
+    if (s.valor_cartao !== undefined && s.valor_pix !== undefined && s.valor_cartao !== null && s.valor_pix !== null) {
+      return (s.valor_cartao || 0) + (s.valor_pix || 0);
+    }
+    return s.payment_method !== 'dinheiro' ? (s.total_price || 0) : 0;
+  };
+
   const salesByDay = filteredSalesForReport.reduce((acc: any[], sale) => {
     const date = new Date(sale.sale_date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
     const existing = acc.find(item => item.date === date);
+    const rev = getSaleRevenue(sale);
     if (existing) {
-      existing.total += sale.total_price;
+      existing.total += rev;
     } else {
-      acc.push({ date, total: sale.total_price });
+      acc.push({ date, total: rev });
     }
     return acc;
   }, []).reverse().slice(reportFilter === 'all' ? -30 : reportFilter === 'year' ? -12 : reportFilter === 'month' ? -30 : -7);
@@ -1053,134 +1153,39 @@ export default function App() {
     const product = products.find(p => p.id === sale.product_id);
     const category = product?.category || 'Outros';
     const existing = acc.find(item => item.name === category);
+    const rev = getSaleRevenue(sale);
     if (existing) {
-      existing.value += sale.total_price;
+      existing.value += rev;
     } else {
-      acc.push({ name: category, value: sale.total_price });
+      acc.push({ name: category, value: rev });
     }
     return acc;
   }, []);
 
-  const today = new Date();
-  const todayStr = today.toISOString().split('T')[0];
+  const todayStr = getBrazilDateParts(new Date());
   const thisMonthStr = todayStr.substring(0, 7);
   const thisYearStr = todayStr.substring(0, 4);
 
   const salesToday = sales
-    .filter(s => s.sale_date.startsWith(todayStr))
-    .reduce((acc, s) => acc + s.total_price, 0);
+    .filter(s => getBrazilDateParts(new Date(s.sale_date)) === todayStr)
+    .reduce((acc, s) => acc + getSaleRevenue(s), 0);
 
   const salesThisMonth = sales
-    .filter(s => s.sale_date.startsWith(thisMonthStr))
-    .reduce((acc, s) => acc + s.total_price, 0);
+    .filter(s => getBrazilDateParts(new Date(s.sale_date)).startsWith(thisMonthStr))
+    .reduce((acc, s) => acc + getSaleRevenue(s), 0);
 
   const salesThisYear = sales
-    .filter(s => s.sale_date.startsWith(thisYearStr))
-    .reduce((acc, s) => acc + s.total_price, 0);
+    .filter(s => getBrazilDateParts(new Date(s.sale_date)).startsWith(thisYearStr))
+    .reduce((acc, s) => acc + getSaleRevenue(s), 0);
 
   const totalStockValue = products.reduce((acc, p) => acc + (p.current_stock * p.price), 0);
-  const totalSalesAllTime = sales.reduce((acc, s) => acc + s.total_price, 0);
-  const totalSalesFiltered = filteredSalesForReport.reduce((acc, s) => acc + s.total_price, 0);
+  const totalSalesAllTime = sales.reduce((acc, s) => acc + getSaleRevenue(s), 0);
+  const totalSalesFiltered = filteredSalesForReport.reduce((acc, s) => acc + getSaleRevenue(s), 0);
+  const totalSalesCashFiltered = filteredSalesForReport.reduce((acc, s) => acc + getSaleCash(s), 0);
+  const totalSalesCardFiltered = filteredSalesForReport.reduce((acc, s) => acc + getSaleCardOrPix(s), 0);
 
   const handlePrint = () => {
-    const printContent = document.getElementById('report-content');
-    if (!printContent) {
-      window.print();
-      return;
-    }
-
-    // Remove any existing print iframes
-    const existingFrame = document.getElementById('print-frame');
-    if (existingFrame) existingFrame.remove();
-
-    const iframe = document.createElement('iframe');
-    iframe.id = 'print-frame';
-    iframe.style.position = 'absolute';
-    iframe.style.width = '0px';
-    iframe.style.height = '0px';
-    iframe.style.border = 'none';
-
-    document.body.appendChild(iframe);
-    const doc = iframe.contentWindow?.document;
-    if (!doc) return;
-
-    doc.open();
-    doc.write(`
-      <html>
-        <head>
-          <title>Relatório VitalLog</title>
-          <style>
-            body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; color: #0f172a; }
-            .no-print { display: none !important; }
-            .print-only { display: block !important; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
-            th, td { border-bottom: 1px solid #e2e8f0; padding: 12px 8px; text-align: left; }
-            th { background-color: #f8fafc; font-weight: 600; color: #475569; }
-            .grid { display: grid; gap: 24px; }
-            .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
-            .md\\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-            .lg\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-            .bg-white { background-color: #ffffff; }
-            .p-6 { padding: 24px; }
-            .p-8 { padding: 32px; }
-            .rounded-3xl { border-radius: 24px; }
-            .border { border: 1px solid #e2e8f0; }
-            .shadow-sm { box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); }
-            .text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
-            .text-2xl { font-size: 1.5rem; line-height: 2rem; }
-            .text-xl { font-size: 1.25rem; line-height: 1.75rem; }
-            .font-bold { font-weight: 700; }
-            .font-black { font-weight: 900; }
-            .text-slate-500 { color: #64748b; }
-            .text-slate-400 { color: #94a3b8; }
-            .text-emerald-600 { color: #059669; }
-            .text-rose-600 { color: #e11d48; }
-            .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
-            .text-xs { font-size: 0.75rem; line-height: 1rem; }
-            .mb-4 { margin-bottom: 1rem; }
-            .mb-8 { margin-bottom: 2rem; }
-            .mt-1 { margin-top: 0.25rem; }
-            .mt-8 { margin-top: 2rem; }
-            .flex { display: flex; }
-            .items-center { align-items: center; }
-            .justify-between { justify-content: space-between; }
-            .gap-2 { gap: 0.5rem; }
-            .gap-4 { gap: 1rem; }
-            .w-12 { width: 3rem; }
-            .h-12 { height: 3rem; }
-            .h-80 { height: 20rem; }
-            .w-full { width: 100%; }
-            .rounded-2xl { border-radius: 1rem; }
-            .bg-emerald-50 { background-color: #ecfdf5; }
-            .bg-sky-50 { background-color: #f0f9ff; }
-            .bg-indigo-50 { background-color: #eef2ff; }
-            .bg-amber-50 { background-color: #fffbeb; }
-            .bg-slate-50 { background-color: #f8fafc; }
-            .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
-            .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
-            .rounded-full { border-radius: 9999px; }
-            .uppercase { text-transform: uppercase; }
-            .h-px { height: 1px; }
-            .bg-slate-200 { background-color: #e2e8f0; }
-            @media print {
-              body { padding: 0; }
-              .no-print { display: none !important; }
-              .print-only { display: block !important; }
-            }
-          </style>
-        </head>
-        <body>
-          ${printContent.innerHTML}
-        </body>
-      </html>
-    `);
-    doc.close();
-
-    // Wait a bit for charts (SVGs) to render if any
-    setTimeout(() => {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    }, 500);
+    window.print();
   };
 
   const handleAuditSubmit = async () => {
@@ -1301,6 +1306,12 @@ export default function App() {
             label="Inventário"
           />
           <NavItem 
+            active={activeTab === 'labels'} 
+            onClick={() => setActiveTab('labels')}
+            icon={<Tag size={20} />}
+            label="Etiquetas"
+          />
+          <NavItem 
             active={activeTab === 'pos'} 
             onClick={() => setActiveTab('pos')}
             icon={<ShoppingCart size={20} />}
@@ -1353,7 +1364,7 @@ export default function App() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto print-container print:hidden">
+      <main className={`flex-1 overflow-y-auto print-container ${(isReceiptModalOpen || closedRegisterSummary || isPrintingLabels) ? 'print:hidden' : ''}`}>
         <header className="h-20 bg-white border-bottom border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10 no-print">
           <div className="relative w-96">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -1739,7 +1750,7 @@ export default function App() {
                       Para realizar vendas, você precisa abrir o caixa informando o valor inicial (troco).
                     </p>
                     <button 
-                      onClick={() => setIsRegisterModalOpen(true)}
+                      onClick={() => openRegisterModal()}
                       className="bg-sky-600 text-white px-8 py-4 rounded-xl font-bold text-lg hover:bg-sky-700 transition-all shadow-lg shadow-sky-200 flex items-center gap-3"
                     >
                       <Plus size={24} />
@@ -1777,7 +1788,7 @@ export default function App() {
                           />
                         </div>
                         <button 
-                          onClick={() => setIsRegisterModalOpen(true)}
+                          onClick={() => openRegisterModal()}
                           className="px-6 py-4 bg-rose-50 text-rose-600 rounded-xl font-bold hover:bg-rose-100 transition-colors whitespace-nowrap"
                         >
                           Fechar Caixa
@@ -2034,7 +2045,7 @@ export default function App() {
                 </div>
 
                 {/* Financial Summary */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 print:grid-cols-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 print:grid-cols-3 mb-6">
                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm print-card">
                     <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-600 mb-4">
                       <DollarSign size={24} />
@@ -2057,12 +2068,26 @@ export default function App() {
                     <h3 className="text-3xl font-black mt-1">R$ {salesThisYear.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</h3>
                   </div>
                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm print-card">
+                    <div className="w-12 h-12 bg-emerald-100 rounded-2xl flex items-center justify-center text-emerald-700 mb-4">
+                      <DollarSign size={24} />
+                    </div>
+                    <p className="text-slate-500 text-sm font-medium">Recebido em Dinheiro (Filtro)</p>
+                    <h3 className="text-3xl font-black mt-1">R$ {totalSalesCashFiltered.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</h3>
+                  </div>
+                  <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm print-card">
+                    <div className="w-12 h-12 bg-sky-100 rounded-2xl flex items-center justify-center text-sky-700 mb-4">
+                      <CreditCard size={24} />
+                    </div>
+                    <p className="text-slate-500 text-sm font-medium">Recebido em Cartão/PIX (Filtro)</p>
+                    <h3 className="text-3xl font-black mt-1">R$ {totalSalesCardFiltered.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</h3>
+                  </div>
+                  <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm print-card">
                     <div className="w-12 h-12 bg-amber-50 rounded-2xl flex items-center justify-center text-amber-600 mb-4">
                       <PieChart size={24} />
                     </div>
-                    <p className="text-slate-500 text-sm font-medium">Ticket Médio (Geral)</p>
+                    <p className="text-slate-500 text-sm font-medium">Ticket Médio (Filtro)</p>
                     <h3 className="text-3xl font-black mt-1">
-                      R$ {sales.length > 0 ? (totalSalesAllTime / sales.length).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '0,00'}
+                      R$ {filteredSalesForReport.length > 0 ? (totalSalesFiltered / filteredSalesForReport.length).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '0,00'}
                     </h3>
                   </div>
                 </div>
@@ -2164,8 +2189,8 @@ export default function App() {
                       <tbody className="divide-y divide-slate-100">
                         {filteredCashRegistersForReport.map(register => {
                           const registerSales = sales.filter(s => s.cash_register_id === register.id);
-                          const totalSales = registerSales.reduce((acc, s) => acc + s.total_price, 0);
-                          const expectedFinal = register.initial_balance + registerSales.filter(s => s.payment_method === 'dinheiro').reduce((acc, s) => acc + s.total_price, 0);
+                          const totalSales = registerSales.reduce((acc, s) => acc + getSaleRevenue(s), 0);
+                          const expectedFinal = register.initial_balance + registerSales.reduce((acc, s) => acc + getSaleCash(s), 0);
                           const difference = register.final_balance !== null ? register.final_balance - expectedFinal : 0;
 
                           return (
@@ -2273,7 +2298,7 @@ export default function App() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {aiInsights.map((insight, idx) => (
                     <motion.div 
-                      key={insight.productId}
+                      key={`${insight.productId}-${idx}`}
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: idx * 0.1 }}
@@ -2581,6 +2606,138 @@ export default function App() {
                 </div>
               </motion.div>
             )}
+            {activeTab === 'labels' && (
+              <motion.div 
+                key="labels"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="space-y-8"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-3xl font-bold tracking-tight">Etiquetas</h2>
+                    <p className="text-slate-500 mt-1">Imprima etiquetas com código de barras para seus produtos.</p>
+                  </div>
+                  <button 
+                    onClick={handlePrintLabels}
+                    disabled={labelQueue.length === 0}
+                    className="px-6 py-3 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-700 transition-colors flex items-center gap-2 disabled:opacity-50"
+                  >
+                    <Printer size={20} />
+                    Imprimir Etiquetas
+                  </button>
+                </div>
+
+                <div className="grid lg:grid-cols-3 gap-8">
+                  {/* Left Column: Product Selection */}
+                  <div className="lg:col-span-2 space-y-6">
+                    <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                      <div className="relative mb-6">
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                        <input
+                          type="text"
+                          placeholder="Buscar produtos para imprimir..."
+                          value={posSearch}
+                          onChange={(e) => setPosSearch(e.target.value)}
+                          className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white transition-all text-sm"
+                        />
+                      </div>
+
+                      <div className="space-y-3 max-h-[500px] overflow-y-auto pr-2">
+                        {filteredProducts.map(product => (
+                          <div key={product.id} className="flex justify-between items-center p-4 border border-slate-100 rounded-2xl hover:border-sky-200 hover:bg-sky-50 transition-colors">
+                            <div className="flex gap-4 items-center">
+                              <div className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center text-slate-400 shrink-0">
+                                <Package size={24} />
+                              </div>
+                              <div>
+                                <h3 className="font-bold text-slate-900 line-clamp-1">{product.name}</h3>
+                                <p className="text-sm text-slate-500">
+                                  {product.barcode ? product.barcode : 'Sem código'} • R$ {product.price.toFixed(2)}
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => addToLabelQueue(product)}
+                              className="w-10 h-10 shrink-0 bg-slate-100 text-slate-600 rounded-xl flex items-center justify-center hover:bg-sky-100 hover:text-sky-600 transition-colors"
+                            >
+                              <Plus size={20} />
+                            </button>
+                          </div>
+                        ))}
+                        {filteredProducts.length === 0 && (
+                          <div className="text-center py-8 text-slate-400">Nenhum produto encontrado.</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Queue Details */}
+                  <div className="space-y-6">
+                    <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                      <h3 className="font-bold text-lg mb-4">Filas de Impressão</h3>
+                      
+                      <div className="mb-6 space-y-2">
+                        <label className="text-sm font-bold text-slate-700">Tamanho da Etiqueta</label>
+                        <select 
+                          value={labelSize}
+                          onChange={(e) => setLabelSize(e.target.value as any)}
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 transition-all font-medium text-slate-700"
+                        >
+                          <option value="40x40">Térmica 40x40mm</option>
+                          <option value="60x40">Térmica 60x40mm</option>
+                          <option value="pimaco">Folha A4 (Pimaco - 3 col)</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-4">
+                        {labelQueue.map(item => (
+                          <div key={item.product.id} className="flex flex-col gap-2 p-3 border border-slate-100 rounded-xl bg-slate-50">
+                            <div className="flex justify-between items-start">
+                              <span className="font-bold text-sm text-slate-800 line-clamp-1 flex-1">{item.product.name}</span>
+                              <button onClick={() => removeFromLabelQueue(item.product.id)} className="text-rose-500 hover:bg-rose-100 p-1 rounded-md transition-colors ml-2">
+                                <X size={14} />
+                              </button>
+                            </div>
+                            <div className="flex justify-between items-center mt-2">
+                              {item.product.barcode && <div className="text-xs text-slate-400 font-mono">{item.product.barcode}</div>}
+                              {!item.product.barcode && <div className="text-xs text-amber-500">Sem código</div>}
+                              
+                              <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-1 ml-auto">
+                                <button
+                                  onClick={() => updateLabelQuantity(item.product.id, item.quantity - 1)}
+                                  className="w-6 h-6 flex items-center justify-center hover:bg-slate-100 rounded text-slate-600"
+                                >
+                                  -
+                                </button>
+                                <span className="w-8 text-center font-bold text-sm">{item.quantity}</span>
+                                <button
+                                  onClick={() => updateLabelQuantity(item.product.id, item.quantity + 1)}
+                                  className="w-6 h-6 flex items-center justify-center hover:bg-slate-100 rounded text-slate-600"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {labelQueue.length === 0 && (
+                          <p className="text-sm text-slate-500 mt-4 text-center">A fila está vazia.</p>
+                        )}
+                        {labelQueue.length > 0 && (
+                          <div className="pt-4 border-t border-slate-200 mt-4 flex justify-between items-center text-sm font-bold">
+                            <span className="text-slate-600">Total de etiquetas:</span>
+                            <span className="text-slate-900">{labelQueue.reduce((acc, item) => acc + item.quantity, 0)}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
             {activeTab === 'settings' && (
               <motion.div
                 key="settings"
@@ -2730,6 +2887,33 @@ export default function App() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Label Printing Overlay */}
+      {isPrintingLabels && (
+        <div className="fixed inset-0 bg-white z-[9999] print:block hidden">
+          <div className={
+             labelSize === 'pimaco' ? 'p-4 grid grid-cols-3 gap-2 w-[210mm]' : 'flex flex-col items-center'
+          }>
+             {labelQueue.flatMap(item => Array.from({length: item.quantity}).map((_, i) => (
+               <div key={`${item.product.id}-${i}`} className={`
+                 flex flex-col items-center justify-center border-slate-300 text-center bg-white overflow-hidden
+                 ${labelSize === '40x40' ? 'w-[40mm] h-[40mm] p-1 border' : ''}
+                 ${labelSize === '60x40' ? 'w-[60mm] h-[40mm] p-2 border' : ''}
+                 ${labelSize === 'pimaco' ? 'w-full h-[30mm] p-2 border rounded-md' : ''}
+               `} style={{ pageBreakAfter: labelSize !== 'pimaco' ? 'always' : 'auto' }}>
+                  <div className="font-bold text-[10px] break-words line-clamp-1 mb-0.5">{storeSettings.name}</div>
+                  <div className="font-bold text-[11px] leading-tight break-words line-clamp-2 w-full px-1">{item.product.name}</div>
+                  <div className="font-black text-sm my-0.5">R$ {item.product.price.toFixed(2)}</div>
+                  {item.product.barcode && (
+                    <div className="w-full flex justify-center scale-75 origin-top mb-[-10px]">
+                      <BarcodeComponent value={item.product.barcode} width={1.2} height={25} fontSize={10} margin={0} background="transparent" />
+                    </div>
+                  )}
+               </div>
+             )))}
+          </div>
+        </div>
+      )}
 
       {/* New Product Modal */}
       <AnimatePresence>
@@ -2989,19 +3173,19 @@ export default function App() {
                     <div className="flex justify-between text-sm">
                       <span className="text-slate-500">Vendas (Dinheiro)</span>
                       <span className="font-bold text-emerald-600">
-                        + R$ {sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method === 'dinheiro').reduce((acc, s) => acc + s.total_price, 0).toFixed(2)}
+                        {isFetchingRegisterSales ? 'Calculando...' : `+ R$ ${registerSalesCash.toFixed(2)}`}
                       </span>
                     </div>
                     <div className="flex justify-between text-sm">
                       <span className="text-slate-500">Vendas (Cartão/PIX)</span>
                       <span className="font-bold text-sky-600">
-                        + R$ {sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method !== 'dinheiro').reduce((acc, s) => acc + s.total_price, 0).toFixed(2)}
+                        {isFetchingRegisterSales ? 'Calculando...' : `+ R$ ${registerSalesOther.toFixed(2)}`}
                       </span>
                     </div>
                     <div className="pt-3 border-t border-slate-200 flex justify-between">
                       <span className="font-bold text-slate-700">Total Esperado em Caixa</span>
                       <span className="font-black text-lg">
-                        R$ {(currentRegister.initial_balance + sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method === 'dinheiro').reduce((acc, s) => acc + s.total_price, 0)).toFixed(2)}
+                        {isFetchingRegisterSales ? 'Calculando...' : `R$ ${(currentRegister.initial_balance + registerSalesCash).toFixed(2)}`}
                       </span>
                     </div>
                   </div>
