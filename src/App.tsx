@@ -32,7 +32,8 @@ import {
   Scale,
   Settings as SettingsIcon,
   Tag,
-  Barcode
+  Barcode,
+  User
 } from 'lucide-react';
 import BarcodeComponent from 'react-barcode';
 import { motion, AnimatePresence } from 'motion/react';
@@ -61,6 +62,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [paymentStatus, setPaymentStatus] = useState<string | null>('loading');
   const [reportFilter, setReportFilter] = useState<'today' | 'week' | 'month' | 'year' | 'all'>('month');
+  const [reportUserFilter, setReportUserFilter] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'pos' | 'reports' | 'ai' | 'xml' | 'audit' | 'settings' | 'labels'>('dashboard');
   
   // Label Printing State
@@ -879,6 +881,8 @@ export default function App() {
               payment_method: 'dinheiro',
               cash_register_id: currentRegister?.id || null,
               loja_id: currentLojaId || null,
+              user_id: session?.user?.id || null,
+              user_name: session?.user?.user_metadata?.name || session?.user?.user_metadata?.full_name || session?.user?.email || 'Desconhecido',
               valor_dinheiro: discountedItemTotal,
               valor_cartao: 0,
               valor_pix: 0
@@ -901,6 +905,8 @@ export default function App() {
               payment_method: 'dinheiro',
               cash_register_id: currentRegister?.id || null,
               loja_id: currentLojaId || null,
+              user_id: session?.user?.id || null,
+              user_name: session?.user?.user_metadata?.name || session?.user?.user_metadata?.full_name || session?.user?.email || 'Desconhecido',
               valor_dinheiro: cashPart,
               valor_cartao: 0,
               valor_pix: 0
@@ -916,6 +922,8 @@ export default function App() {
               payment_method: mixedCardMethod,
               cash_register_id: currentRegister?.id || null,
               loja_id: currentLojaId || null,
+              user_id: session?.user?.id || null,
+              user_name: session?.user?.user_metadata?.name || session?.user?.user_metadata?.full_name || session?.user?.email || 'Desconhecido',
               valor_dinheiro: 0,
               valor_cartao: (mixedCardMethod === 'cartao_credito' || mixedCardMethod === 'cartao_debito') ? cardPart : 0,
               valor_pix: mixedCardMethod === 'pix' ? cardPart : 0
@@ -935,6 +943,8 @@ export default function App() {
               payment_method: mixedCardMethod,
               cash_register_id: currentRegister?.id || null,
               loja_id: currentLojaId || null,
+              user_id: session?.user?.id || null,
+              user_name: session?.user?.user_metadata?.name || session?.user?.user_metadata?.full_name || session?.user?.email || 'Desconhecido',
               valor_dinheiro: 0,
               valor_cartao: (mixedCardMethod === 'cartao_credito' || mixedCardMethod === 'cartao_debito') ? discountedItemTotal : 0,
               valor_pix: mixedCardMethod === 'pix' ? discountedItemTotal : 0
@@ -954,6 +964,8 @@ export default function App() {
               payment_method: selectedPaymentMethod,
               cash_register_id: currentRegister?.id || null,
               loja_id: currentLojaId || null,
+              user_id: session?.user?.id || null,
+              user_name: session?.user?.user_metadata?.name || session?.user?.user_metadata?.full_name || session?.user?.email || 'Desconhecido',
               valor_dinheiro: selectedPaymentMethod === 'dinheiro' ? discountedItemTotal : 0,
               valor_cartao: (selectedPaymentMethod === 'cartao_credito' || selectedPaymentMethod === 'cartao_debito') ? discountedItemTotal : 0,
               valor_pix: selectedPaymentMethod === 'pix' ? discountedItemTotal : 0
@@ -1071,6 +1083,10 @@ export default function App() {
     const thisYearStr = todayStr.substring(0, 4);
     
     return sales.filter(sale => {
+      if (reportUserFilter !== 'all') {
+        if (reportUserFilter === 'unknown' && sale.user_id) return false;
+        if (reportUserFilter !== 'unknown' && sale.user_id !== reportUserFilter) return false;
+      }
       const saleDateStr = getBrazilDateParts(new Date(sale.sale_date));
       switch (reportFilter) {
         case 'today':
@@ -1166,23 +1182,46 @@ export default function App() {
   const thisMonthStr = todayStr.substring(0, 7);
   const thisYearStr = todayStr.substring(0, 4);
 
-  const salesToday = sales
+  const filteredSalesByUser = sales.filter(s => {
+    if (reportUserFilter !== 'all') {
+      if (reportUserFilter === 'unknown' && s.user_id) return false;
+      if (reportUserFilter !== 'unknown' && s.user_id !== reportUserFilter) return false;
+    }
+    return true;
+  });
+
+  const dashboardSalesThisMonth = sales
+    .filter(s => getBrazilDateParts(new Date(s.sale_date)).startsWith(thisMonthStr))
+    .filter(s => s.user_id === session?.user?.id)
+    .reduce((acc, s) => acc + getSaleRevenue(s), 0);
+
+  const salesToday = filteredSalesByUser
     .filter(s => getBrazilDateParts(new Date(s.sale_date)) === todayStr)
     .reduce((acc, s) => acc + getSaleRevenue(s), 0);
 
-  const salesThisMonth = sales
+  const salesThisMonth = filteredSalesByUser
     .filter(s => getBrazilDateParts(new Date(s.sale_date)).startsWith(thisMonthStr))
     .reduce((acc, s) => acc + getSaleRevenue(s), 0);
 
-  const salesThisYear = sales
+  const salesThisYear = filteredSalesByUser
     .filter(s => getBrazilDateParts(new Date(s.sale_date)).startsWith(thisYearStr))
     .reduce((acc, s) => acc + getSaleRevenue(s), 0);
 
   const totalStockValue = products.reduce((acc, p) => acc + (p.current_stock * p.price), 0);
-  const totalSalesAllTime = sales.reduce((acc, s) => acc + getSaleRevenue(s), 0);
+  const totalSalesAllTime = filteredSalesByUser.reduce((acc, s) => acc + getSaleRevenue(s), 0);
   const totalSalesFiltered = filteredSalesForReport.reduce((acc, s) => acc + getSaleRevenue(s), 0);
   const totalSalesCashFiltered = filteredSalesForReport.reduce((acc, s) => acc + getSaleCash(s), 0);
   const totalSalesCardFiltered = filteredSalesForReport.reduce((acc, s) => acc + getSaleCardOrPix(s), 0);
+
+  const distinctUsers = useMemo(() => {
+    const userMap = new Map<string, string>();
+    sales.forEach(s => {
+      if (s.user_id) {
+        userMap.set(s.user_id, s.user_name || 'Usuário Desconhecido');
+      }
+    });
+    return Array.from(userMap.entries()).map(([id, name]) => ({ id, name }));
+  }, [sales]);
 
   const handlePrint = () => {
     window.print();
@@ -1358,7 +1397,7 @@ export default function App() {
             className="w-full flex items-center justify-center gap-2 bg-slate-50 text-slate-600 py-3 rounded-xl font-semibold hover:bg-rose-50 hover:text-rose-600 transition-colors"
           >
             <LogOut size={18} />
-            Sair
+            Alternar Operador
           </button>
         </div>
       </aside>
@@ -1378,8 +1417,8 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <div className="flex flex-col items-end">
-              <span className="text-sm font-medium">Gabriel Calid</span>
-              <span className="text-xs text-slate-500 uppercase tracking-wider">Administrador</span>
+              <span className="text-sm font-medium">{session?.user?.user_metadata?.name || session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || 'Operador'}</span>
+              <span className="text-xs text-slate-500 uppercase tracking-wider">Operador / Caixa</span>
             </div>
             <div className="w-10 h-10 bg-slate-200 rounded-full overflow-hidden">
               <img src="https://picsum.photos/seed/user/100/100" alt="Avatar" referrerPolicy="no-referrer" />
@@ -1445,8 +1484,8 @@ export default function App() {
                     icon={<Package className="text-sky-600" size={24} />}
                   />
                   <StatCard 
-                    title="Vendas Mensais" 
-                    value={`R$ ${salesThisMonth.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}
+                    title="Vendas Mensais (Meu Usuário)" 
+                    value={`R$ ${dashboardSalesThisMonth.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}
                     trend="+8.2%"
                     trendUp={true}
                     icon={<TrendingUp className="text-emerald-600" size={24} />}
@@ -2019,6 +2058,20 @@ export default function App() {
                         <option value="month">Este Mês</option>
                         <option value="year">Este Ano</option>
                         <option value="all">Todo o Período</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                      <User size={18} className="text-slate-500" />
+                      <select 
+                        value={reportUserFilter}
+                        onChange={(e) => setReportUserFilter(e.target.value)}
+                        className="bg-transparent text-sm font-bold outline-none cursor-pointer text-slate-700"
+                      >
+                        <option value="all">Todos os Operadores</option>
+                        {distinctUsers.map(u => (
+                          <option key={u.id} value={u.id}>{u.name}</option>
+                        ))}
+                        <option value="unknown">Sem Operador Registrado</option>
                       </select>
                     </div>
                     <button 
