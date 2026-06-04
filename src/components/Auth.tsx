@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Package, Lock, Mail, ArrowRight, UserPlus, LogIn } from 'lucide-react';
+import { Package, Lock, Mail, ArrowRight, UserPlus, LogIn, User } from 'lucide-react';
 import { motion } from 'motion/react';
 
 export default function Auth({ onLogin }: { onLogin: () => void }) {
   const [isLogin, setIsLogin] = useState(true);
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -29,6 +30,9 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
         const { error } = await supabase.auth.signUp({
           email,
           password,
+          options: {
+            data: { name }
+          }
         });
         if (error) throw error;
         setMessage('Registro realizado com sucesso! Você já pode fazer login.');
@@ -74,6 +78,22 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
         )}
 
         <form onSubmit={handleAuth} className="space-y-5">
+          {!isLogin && (
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">Nome Completo</label>
+              <div className="relative">
+                <User className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white transition-all"
+                  placeholder="Nome do Operador"
+                  required={!isLogin}
+                />
+              </div>
+            </div>
+          )}
           <div>
             <label className="block text-sm font-semibold text-slate-700 mb-2">Email</label>
             <div className="relative">
