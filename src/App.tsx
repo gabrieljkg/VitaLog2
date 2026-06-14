@@ -1215,13 +1215,19 @@ export default function App() {
 
   const distinctUsers = useMemo(() => {
     const userMap = new Map<string, string>();
+    if (session?.user?.id) {
+      userMap.set(
+        session.user.id,
+        session.user.user_metadata?.name || session.user.user_metadata?.full_name || session.user.email || 'Meu Usuário Atual'
+      );
+    }
     sales.forEach(s => {
       if (s.user_id) {
         userMap.set(s.user_id, s.user_name || 'Usuário Desconhecido');
       }
     });
     return Array.from(userMap.entries()).map(([id, name]) => ({ id, name }));
-  }, [sales]);
+  }, [sales, session]);
 
   const handlePrint = () => {
     window.print();
