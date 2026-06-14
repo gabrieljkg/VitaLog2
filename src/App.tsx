@@ -95,6 +95,7 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [showAllSales, setShowAllSales] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [auditCounts, setAuditCounts] = useState<Record<number, number>>({});
@@ -2295,7 +2296,14 @@ export default function App() {
                 <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden print-card">
                   <div className="p-6 border-b border-slate-100 flex items-center justify-between">
                     <h3 className="font-bold text-xl">Histórico de Vendas Recentes</h3>
-                    <button className="text-sky-600 font-bold text-sm hover:underline no-print">Ver tudo</button>
+                    {filteredSalesForReport.length > 10 && (
+                      <button 
+                        onClick={() => setShowAllSales(!showAllSales)}
+                        className="text-sky-600 font-bold text-sm hover:underline no-print"
+                      >
+                        {showAllSales ? 'Ver menos' : 'Ver tudo'}
+                      </button>
+                    )}
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left">
@@ -2309,7 +2317,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {filteredSalesForReport.slice(0, 10).map(sale => (
+                        {(showAllSales ? filteredSalesForReport : filteredSalesForReport.slice(0, 10)).map(sale => (
                           <tr key={sale.id} className="hover:bg-slate-50 transition-colors">
                             <td className="px-6 py-4 text-sm text-slate-500">
                               {new Date(sale.sale_date).toLocaleString('pt-BR')}
