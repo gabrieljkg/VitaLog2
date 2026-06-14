@@ -516,12 +516,17 @@ export default function App() {
           const prod = details[i].getElementsByTagName("prod")[0];
           if (prod) {
             const name = prod.getElementsByTagName("xProd")[0]?.textContent || "";
-            const barcode = prod.getElementsByTagName("cEAN")[0]?.textContent || prod.getElementsByTagName("cProd")[0]?.textContent || "";
+            const cEAN = prod.getElementsByTagName("cEAN")[0]?.textContent || "";
+            const cProd = prod.getElementsByTagName("cProd")[0]?.textContent || "";
+            const barcode = (cEAN && cEAN !== "SEM GTIN") ? cEAN : cProd;
             const quantity = parseFloat(prod.getElementsByTagName("qCom")[0]?.textContent || "0");
             const price = parseFloat(prod.getElementsByTagName("vUnCom")[0]?.textContent || "0");
             
             // Try to match with existing product by barcode
-            const matched = products.find(p => p.barcode === barcode);
+            let matched = products.find(p => p.barcode && p.barcode === barcode);
+            if (!matched) {
+              matched = products.find(p => p.name.toLowerCase().trim() === name.toLowerCase().trim() || (p.barcode && p.barcode === cProd));
+            }
 
             parsedProducts.push({
               name,
@@ -2482,11 +2487,11 @@ export default function App() {
                         
                         <button 
                           onClick={syncXmlToStock}
-                          disabled={isSaving || xmlProducts.filter(p => p.matchedProductId).length === 0}
+                          disabled={isSaving}
                           className="w-full mt-8 py-4 bg-emerald-500 text-white rounded-2xl font-bold hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Link size={20} />}
-                          Vincular e Atualizar Estoque
+                          Confirmar Nota
                         </button>
                       </div>
                     )}
@@ -2497,12 +2502,22 @@ export default function App() {
                       <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
                         <h3 className="font-bold text-lg">Produtos na Nota</h3>
                         {xmlProducts.length > 0 && (
-                          <button 
-                            onClick={() => setXmlProducts([])}
-                            className="text-slate-400 hover:text-rose-600 transition-colors"
-                          >
-                            Limpar
-                          </button>
+                          <div className="flex items-center gap-4">
+                            <button 
+                              onClick={() => setXmlProducts([])}
+                              className="text-slate-400 font-medium hover:text-rose-600 transition-colors"
+                            >
+                              Limpar XML
+                            </button>
+                            <button 
+                              onClick={syncXmlToStock}
+                              disabled={isSaving}
+                              className="px-6 py-2 bg-emerald-500 text-white rounded-xl font-bold hover:bg-emerald-600 transition-all flex items-center gap-2 shadow-sm disabled:opacity-50"
+                            >
+                              {isSaving ? <RefreshCw size={18} className="animate-spin" /> : <Link size={18} />}
+                              Confirmar Nota
+                            </button>
+                          </div>
                         )}
                       </div>
                       <div className="overflow-x-auto">
