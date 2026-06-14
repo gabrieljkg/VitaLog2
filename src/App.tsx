@@ -1231,7 +1231,9 @@ export default function App() {
         userMap.set(s.user_id, s.user_name || 'Usuário Desconhecido');
       }
     });
-    return Array.from(userMap.entries()).map(([id, name]) => ({ id, name }));
+    return Array.from(userMap.entries())
+      .map(([id, name]) => ({ id, name }))
+      .filter(u => u.name !== 'Gabriel Calid Brito de Almeida');
   }, [sales, session]);
 
   const handlePrint = () => {
